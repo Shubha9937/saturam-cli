@@ -171,8 +171,15 @@ export class LlmService {
             credentials = undefined;
         }
 
+        const targetModel =
+            (model === LLMModel.BEDROCK_CUSTOM && providerConfig?.model)
+                ? providerConfig.model
+                : (model as string);
         const regionPrefix = region.startsWith("eu") ? "eu" : region.startsWith("ap") ? "ap" : "us";
-        const resolvedModel = model.startsWith("anthropic.") ? `${regionPrefix}.${model}` : model;
+        const resolvedModel =
+            targetModel.startsWith("anthropic.") && !targetModel.startsWith(`${regionPrefix}.`)
+                ? `${regionPrefix}.${targetModel}`
+                : targetModel;
 
         return new ChatBedrockConverse({
             model: resolvedModel,

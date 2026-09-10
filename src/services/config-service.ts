@@ -101,15 +101,15 @@ export type SessionConfiguration = z.infer<typeof SessionConfigurationSchema>;
 
 export const PROVIDER_MODELS: Record<AIProvider, LLMModel[]> = {
     [AIProvider.ANTHROPIC]: [
+        LLMModel.ANTHROPIC_CLAUDE_4_6_SONNET,
+        LLMModel.ANTHROPIC_CLAUDE_4_6_OPUS,
         LLMModel.ANTHROPIC_CLAUDE_4_SONNET,
         LLMModel.ANTHROPIC_CLAUDE_4_5_SONNET,
-        LLMModel.ANTHROPIC_CLAUDE_4_6_OPUS,
     ],
     [AIProvider.BEDROCK]: [
-        LLMModel.BEDROCK_CLAUDE_4_SONNET,
+        LLMModel.BEDROCK_CLAUDE_4_6_SONNET,
         LLMModel.BEDROCK_CLAUDE_4_5_SONNET,
         LLMModel.BEDROCK_CLAUDE_4_6_OPUS,
-        LLMModel.BEDROCK_NOVA_PRO,
     ],
     [AIProvider.GOOGLE]: [
         LLMModel.GEMINI_2_5_PRO,
@@ -215,8 +215,30 @@ export class ConfigService {
 
         const configPath = this.getPersonalConfigPath();
         if (existsSync(configPath)) {
-            const raw = await readFile(configPath, "utf8");
-            this.personalConfig = PersonalConfigurationSchema.parse(this.normalizePersonalConfig(JSON.parse(raw)));
+            try {
+                const raw = await readFile(configPath, "utf8");
+                const normalized = this.normalizePersonalConfig(JSON.parse(raw));
+                const parsed = PersonalConfigurationSchema.safeParse(normalized);
+                if (parsed.success) {
+                    this.personalConfig = parsed.data;
+                } else {
+                    // Fallback attempt: if defaultModel was invalid/legacy, strip it and parse the rest
+                    if (normalized && typeof normalized === "object") {
+                        const fallbackObj = { ...(normalized as Record<string, unknown>) };
+                        delete fallbackObj.defaultModel;
+                        const fallbackParsed = PersonalConfigurationSchema.safeParse(fallbackObj);
+                        if (fallbackParsed.success) {
+                            this.personalConfig = fallbackParsed.data;
+                        } else {
+                            this.personalConfig = PersonalConfigurationSchema.parse({});
+                        }
+                    } else {
+                        this.personalConfig = PersonalConfigurationSchema.parse({});
+                    }
+                }
+            } catch {
+                this.personalConfig = PersonalConfigurationSchema.parse({});
+            }
         } else {
             this.personalConfig = PersonalConfigurationSchema.parse({});
         }

@@ -35,12 +35,18 @@ const MODEL_DISPLAY_NAMES: Record<LLMModel, string> = {
     // Anthropic
     [LLMModel.ANTHROPIC_CLAUDE_4_SONNET]: "Claude 4 Sonnet (latest)",
     [LLMModel.ANTHROPIC_CLAUDE_4_5_SONNET]: "Claude 4.5 Sonnet",
+    [LLMModel.ANTHROPIC_CLAUDE_4_6_SONNET]: "Claude 4.6 Sonnet",
     [LLMModel.ANTHROPIC_CLAUDE_4_6_OPUS]: "Claude 4.6 Opus (1M context)",
     // Bedrock
+    [LLMModel.BEDROCK_CLAUDE_3_5_SONNET]: "Claude 3.5 Sonnet v2",
+    [LLMModel.BEDROCK_CLAUDE_3_7_SONNET]: "Claude 3.7 Sonnet",
+    [LLMModel.BEDROCK_CLAUDE_3_5_HAIKU]: "Claude 3.5 Haiku",
     [LLMModel.BEDROCK_CLAUDE_4_SONNET]: "Bedrock Claude 4 Sonnet",
     [LLMModel.BEDROCK_CLAUDE_4_5_SONNET]: "Bedrock Claude 4.5 Sonnet",
+    [LLMModel.BEDROCK_CLAUDE_4_6_SONNET]: "Bedrock Claude 4.6 Sonnet",
     [LLMModel.BEDROCK_CLAUDE_4_6_OPUS]: "Bedrock Claude 4.6 Opus",
     [LLMModel.BEDROCK_NOVA_PRO]: "Amazon Nova Pro",
+    [LLMModel.BEDROCK_CUSTOM]: "Custom Bedrock model (specify model ID or ARN)",
     // Gemini
     [LLMModel.GEMINI_2_5_PRO]: "Gemini 2.5 Pro",
     [LLMModel.GEMINI_2_5_FLASH]: "Gemini 2.5 Flash",
@@ -178,8 +184,13 @@ export class InitCommand implements TypedCommand<typeof INPUTS> {
 
         // Step 2: Configure each provider
         const providers: PersonalConfiguration["providers"] = {};
+        let remoteConfig: RemoteConfig | undefined = existing.remote;
         for (const provider of selectedProviders) {
-            providers[provider] = await this.configureProvider(provider, existing.providers?.[provider]);
+            const res = await this.configureProvider(provider, existing.providers?.[provider], existing.remote);
+            providers[provider] = res.providerConfig;
+            if (res.remoteConfig) {
+                remoteConfig = res.remoteConfig;
+            }
         }
 
         // Step 3: Select default provider and model
@@ -200,7 +211,7 @@ export class InitCommand implements TypedCommand<typeof INPUTS> {
         const scmConfig = await this.configureSCMPlatforms(existing);
 
         // Step 5: Remote credential retrieval (optional)
-        const remote = await this.maybeConfigureRemote(existing.remote);
+        const remote = remoteConfig ?? (await this.maybeConfigureRemote(existing.remote));
 
         return {
             defaultProvider,
@@ -249,40 +260,56 @@ export class InitCommand implements TypedCommand<typeof INPUTS> {
         return { url, token: token || undefined };
     }
 
-    private async configureProvider(provider: AIProvider, existing?: ProviderConfig): Promise<ProviderConfig> {
+    private async configureProvider(
+        provider: AIProvider,
+        existing?: ProviderConfig,
+        existingRemote?: RemoteConfig,
+    ): Promise<{ providerConfig: ProviderConfig; remoteConfig?: RemoteConfig }> {
         logger.info(`\nConfiguring ${PROVIDER_DISPLAY_NAMES[provider]}...`);
 
         if (provider === AIProvider.BEDROCK) {
-            return this.configureBedrockProvider(existing);
+            return this.configureBedrockProvider(existing, existingRemote);
         }
 
         if (provider === AIProvider.OPENAI) {
-            return this.configureOpenAIProvider(existing);
+            return { providerConfig: await this.configureOpenAIProvider(existing) };
         }
 
         if (provider === AIProvider.OLLAMA) {
-            return this.configureOllamaProvider(existing);
+            return { providerConfig: await this.configureOllamaProvider(existing) };
         }
 
         if (provider === AIProvider.SELF_HOSTED) {
-            return this.configureSelfHostedProvider(existing);
+            return { providerConfig: await this.configureSelfHostedProvider(existing) };
         }
 
         // Standard API key provider
         const apiKey = await this.promptForApiKey(provider, existing?.apiKey);
-        return { apiKey, enabled: true };
+        return { providerConfig: { apiKey, enabled: true } };
     }
 
-    private async configureBedrockProvider(existing?: ProviderConfig): Promise<ProviderConfig> {
-        logger.info("Bedrock uses AWS credentials (no API key needed).");
-        logger.info(
-            "Tip: enable remote credential retrieval later in this setup to skip local AWS configuration entirely.",
-        );
+    private async configureBedrockProvider(
+        existing?: ProviderConfig,
+        existingRemote?: RemoteConfig,
+    ): Promise<{ providerConfig: ProviderConfig; remoteConfig?: RemoteConfig }> {
+        logger.info("\n--- AWS Bedrock Credentials ---");
 
-        const awsProfile = await input({
-            message: "AWS CLI profile name (leave empty for default credential chain or remote mode):",
-            default: existing?.awsProfile ?? process.env.AWS_PROFILE ?? "",
+        const useRemote = await confirm({
+            message: "Configure remote AWS credential API URL for Bedrock?",
+            default: true,
         });
+
+        let remoteConfig: RemoteConfig | undefined;
+        if (useRemote) {
+            remoteConfig = await this.configureRemote(existingRemote);
+        }
+
+        const awsProfile = useRemote
+            ? undefined
+            : await input({
+                  message: "AWS CLI profile name (leave empty for default credential chain):",
+                  default: existing?.awsProfile ?? process.env.AWS_PROFILE ?? "",
+              });
 
         const awsRegion = await input({
             message: "AWS region:",
@@ -301,9 +328,12 @@ export class InitCommand implements TypedCommand<typeof INPUTS> {
         }
 
         return {
-            enabled: true,
-            awsProfile: awsProfile || undefined,
-            awsRegion,
+            providerConfig: {
+                enabled: true,
+                awsProfile: awsProfile || undefined,
+                awsRegion,
+            },
+            remoteConfig,
         };
     }
 
@@ -446,9 +476,17 @@ export class InitCommand implements TypedCommand<typeof INPUTS> {
             })),
         });
 
-        const providerConfig = await this.configureProvider(provider, existing.providers?.[provider]);
+        const { providerConfig, remoteConfig } = await this.configureProvider(
+            provider,
+            existing.providers?.[provider],
+            existing.remote,
+        );
         const providers = { ...existing.providers, [provider]: providerConfig };
-        const config: PersonalConfiguration = { ...existing, providers };
+        const config: PersonalConfiguration = {
+            ...existing,
+            providers,
+            ...(remoteConfig ? { remote: remoteConfig } : {}),
+        };
         await this.config.savePersonalConfig(config);
 
         logger.info(`\n${PROVIDER_DISPLAY_NAMES[provider]} configured successfully.`);
@@ -513,10 +551,23 @@ export class InitCommand implements TypedCommand<typeof INPUTS> {
             value: m,
         }));
 
-        return select({
+        const selected = await select({
             message: "Select your default model:",
             choices,
         });
+
+        if (selected === LLMModel.BEDROCK_CUSTOM) {
+            const customModel = await input({
+                message: "Enter custom Bedrock model ID or ARN:",
+                default: providerConfig?.model ?? "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                validate: (val) => (val.trim() ? true : "Model ID is required"),
+            });
+            if (providerConfig) {
+                providerConfig.model = customModel.trim();
+            }
+        }
+
+        return selected;
     }
 
     private async promptForOllamaModel(providerConfig?: ProviderConfig): Promise<LLMModel> {
