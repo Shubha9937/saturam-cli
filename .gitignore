@@ -8,3 +8,6 @@ built/
 logs/
 *.log
 .DS_Store
+sat-cloud-service/
+lambda/
+
